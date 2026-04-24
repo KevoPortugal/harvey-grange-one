@@ -598,68 +598,118 @@
 </footer>
 
 <script>
-/* ── Starfield ─────────────────────────────────────────────────── */
+/* ── Starfield — warp hyperspace ───────────────────────────────── */
 (function () {
   const canvas = document.getElementById('starfield');
   const ctx    = canvas.getContext('2d');
 
-  const COLORS = ['#ffffff','#00f5ff','#ff2d78','#ffe600','#39ff14','#bf5fff','#7df9ff','#ff6ec7'];
-  const STAR_COUNT = 320;
-  const TWINKLE_SPEED = 0.018;
+  const COLORS      = ['#ffffff','#00f5ff','#ff2d78','#ffe600','#39ff14','#bf5fff','#7df9ff','#ff6ec7'];
+  const STAR_COUNT  = 500;
+  const BASE_SPEED  = 0.00085;   // z-depth consumed per frame at normal warp
+  const WARP_SPEED  = 0.0032;    // speed during warp-burst
+  const WARP_EVERY  = 9000;      // ms between warp bursts
+  const WARP_DUR    = 1800;      // ms warp lasts
 
-  let W, H, stars = [];
+  let W, H, cx, cy, stars = [];
+  let warpActive = false, warpStart = 0;
 
   function resize() {
     W = canvas.width  = window.innerWidth;
     H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
   }
 
-  function makeStar() {
+  /* Each star lives in 3-D: x,y in [-1,1], z in (0,1].
+     z=1 is far away; z→0 is right in your face.            */
+  function makeStar(randomZ = true) {
     return {
-      x: Math.random() * W,
-      y: Math.random() * H,
-      r: Math.random() * 1.6 + 0.3,
+      x:     (Math.random() - 0.5) * 2,
+      y:     (Math.random() - 0.5) * 2,
+      z:     randomZ ? Math.random() * 0.98 + 0.02 : 0.98 + Math.random() * 0.02,
+      pz:    null,          // previous z (for streak)
       color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      speed: Math.random() * 0.04 + 0.005,
-      phase: Math.random() * Math.PI * 2,
-      drift: (Math.random() - 0.5) * 0.05,
     };
   }
 
   function init() {
     resize();
-    stars = Array.from({ length: STAR_COUNT }, makeStar);
+    stars = Array.from({ length: STAR_COUNT }, () => makeStar(true));
   }
 
-  function draw() {
-    ctx.clearRect(0, 0, W, H);
-    const t = performance.now() * 0.001;
+  // Project a star's 3-D coords onto 2-D screen
+  function project(x, y, z) {
+    return {
+      sx: cx + (x / z) * cx,
+      sy: cy + (y / z) * cy,
+      r:  Math.max(0.3, (1 - z) * 3.5),
+    };
+  }
+
+  let lastTime = 0;
+
+  function draw(now) {
+    const dt      = Math.min(now - lastTime, 50);   // cap to avoid huge jumps
+    lastTime = now;
+
+    // Warp burst logic
+    if (!warpActive && now - warpStart > WARP_EVERY) {
+      warpActive = true;
+      warpStart  = now;
+    }
+    if (warpActive && now - warpStart > WARP_DUR) {
+      warpActive = false;
+      warpStart  = now;
+    }
+    const speed = warpActive
+      ? BASE_SPEED + (WARP_SPEED - BASE_SPEED) * Math.min((now - warpStart) / 300, 1)
+      : BASE_SPEED;
+
+    // Fade trail — use semi-transparent clear so streaks linger briefly
+    ctx.fillStyle = warpActive ? 'rgba(3,1,10,0.35)' : 'rgba(3,1,10,0.55)';
+    ctx.fillRect(0, 0, W, H);
 
     for (const s of stars) {
-      const alpha = 0.45 + 0.55 * Math.abs(Math.sin(t * s.speed * 8 + s.phase));
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle   = s.color;
+      s.pz = s.z;
+      s.z -= speed * dt;
 
-      // Occasional cross-flare for bright stars
-      if (s.r > 1.3) {
-        ctx.shadowBlur  = 8;
-        ctx.shadowColor = s.color;
-        ctx.fillRect(s.x - s.r * 3, s.y - 0.5, s.r * 6, 1);
-        ctx.fillRect(s.x - 0.5, s.y - s.r * 3, 1, s.r * 6);
+      if (s.z <= 0.01) {
+        // Recycle — spawn far away
+        Object.assign(s, makeStar(false));
+        s.pz = s.z;
+        continue;
       }
 
-      ctx.shadowBlur  = 6;
-      ctx.shadowColor = s.color;
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      const cur  = project(s.x, s.y, s.z);
+      const prev = project(s.x, s.y, s.pz);
 
-      // Slow drift
-      s.x += s.drift;
-      if (s.x < -4) s.x = W + 4;
-      if (s.x > W + 4) s.x = -4;
+      // Brightness grows as star approaches
+      const bright = Math.pow(1 - s.z, 1.4);
+      const alpha  = 0.35 + 0.65 * bright;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = s.color;
+      ctx.fillStyle   = s.color;
+      ctx.shadowBlur  = warpActive ? 14 : 6;
+      ctx.shadowColor = s.color;
+
+      if (warpActive || s.z < 0.25) {
+        // Draw streak from previous position
+        const lineW = Math.max(0.5, cur.r * 0.7);
+        ctx.lineWidth = lineW;
+        ctx.beginPath();
+        ctx.moveTo(prev.sx, prev.sy);
+        ctx.lineTo(cur.sx,  cur.sy);
+        ctx.stroke();
+      } else {
+        // Simple dot
+        ctx.beginPath();
+        ctx.arc(cur.sx, cur.sy, cur.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
     }
 
     requestAnimationFrame(draw);
@@ -667,7 +717,10 @@
 
   window.addEventListener('resize', () => { resize(); });
   init();
-  draw();
+
+  // Kick off — stagger warp timer so it doesn't fire immediately
+  warpStart = performance.now();
+  requestAnimationFrame(t => { lastTime = t; draw(t); });
 })();
 
 /* ── Hamburger ─────────────────────────────────────────────────── */
